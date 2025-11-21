@@ -1,0 +1,496 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Four-Point Linkage Visualiser (A–B–C–D)</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            background: #000;
+            color: #ddd;
+        }
+        h1 { margin: 0 0 10px 0; }
+        .panel {
+            background: #111;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .row {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        .controls { width: 260px; }
+        label { display: block; margin: 6px 0 2px; }
+        input, select {
+            width: 100%;
+            padding: 6px;
+            background: #222;
+            border: 1px solid #444;
+            color: #eee;
+            border-radius: 4px;
+        }
+        #canvas {
+            width: 100%;
+            max-width: 1000px;
+            background: #000;
+            border: 1px solid #333;
+            border-radius: 8px;
+            display: block;
+            margin: auto;
+        }
+        .small { font-size: 0.85em; color: #aaa; line-height: 1.4em; }
+        .math-block { margin-top: 10px; }
+        .math-block h3 { margin-bottom: 4px; }
+        .inline-row { display:flex; gap:8px; }
+        .inline-row > div { flex:1; }
+    </style>
+</head>
+<body>
+<h1>Four-Point Linkage Visualiser (A–B–C–D)</h1>
+
+<div class="panel">
+    <div class="row">
+        <div class="controls">
+            <label>Axis joint</label>
+            <select id="axisJoint">
+                <option value="A">Axis at A (angle at A)</option>
+                <option value="B">Axis at B (B position)</option>
+                <option value="C">Axis at C (C position)</option>
+                <option value="D">Axis at D (angle at D)</option>
+            </select>
+
+            <label style="margin-top:12px;">
+                <input type="checkbox" id="showDebug" checked>
+                Show debug (grid, circles)
+            </label>
+
+            <hr style="border-color:#333; margin:12px 0;">
+
+            <h3>Geometry</h3>
+
+            <label>Ground length AD</label>
+            <input id="lenAD" type="number" value="1" step="0.1"/>
+
+            <label>Length AB</label>
+            <input id="lenAB" type="number" value="1.5" step="0.1"/>
+
+            <label>Length BC</label>
+            <input id="lenBC" type="number" value="1" step="0.1"/>
+
+            <label>Length CD</label>
+            <input id="lenCD" type="number" value="2" step="0.1"/>
+
+            <hr style="border-color:#333; margin:12px 0;">
+
+            <div id="axisAngleBlock">
+                <h3>Axis angle</h3>
+                <label id="angleLabel">Angle at A (deg)</label>
+                <input id="axisAngle" type="number" value="30" step="0.1"/>
+            </div>
+
+            <div id="axisPosBlock" style="display:none;">
+                <h3>Axis position</h3>
+                <div class="inline-row">
+                    <div>
+                        <label>Axis X</label>
+                        <input id="axisX" type="number" value="0.5" step="0.1"/>
+                    </div>
+                    <div>
+                        <label>Axis Y</label>
+                        <input id="axisY" type="number" value="0.8" step="0.1"/>
+                    </div>
+                </div>
+                <p class="small">
+                    When axis joint is B or C, these coordinates set where that joint is physically.
+                </p>
+            </div>
+        </div>
+
+        <div style="flex:1; min-width:300px;">
+            <canvas id="canvas"></canvas>
+        </div>
+    </div>
+</div>
+
+<div class="panel" id="results"></div>
+
+<script>
+    // --- basic helpers ---
+    function toRad(d){ return d * Math.PI / 180; }
+    function toDeg(r){ return r * 180 / Math.PI; }
+    function dist(p,q){ const dx=q.x-p.x, dy=q.y-p.y; return Math.sqrt(dx*dx+dy*dy); }
+
+    function angleAt(p,q,r){
+        // angle PQR in degrees
+        const qp=dist(q,p), qr=dist(q,r), pr=dist(p,r);
+        const cosVal=(qp*qp + qr*qr - pr*pr)/(2*qp*qr);
+        const c=Math.max(-1, Math.min(1, cosVal));
+        return toDeg(Math.acos(c));
+    }
+
+    // circle-circle intersection with internal values
+    function circleIntersect(P,r1,Q,r2){
+        const dx=Q.x-P.x, dy=Q.y-P.y;
+        const d=Math.sqrt(dx*dx+dy*dy);
+        if(d===0 && r1===r2) return null;
+        if(d>r1+r2) return null;
+        if(d<Math.abs(r1-r2)) return null;
+
+        const a=(r1*r1 - r2*r2 + d*d)/(2*d);
+        const h2=r1*r1 - a*a;
+        if(h2<0) return null;
+        const h=Math.sqrt(h2);
+
+        const xm=P.x + a*dx/d;
+        const ym=P.y + a*dy/d;
+        const rx=-dy*(h/d);
+        const ry= dx*(h/d);
+
+        const p1={x:xm+rx, y:ym+ry};
+        const p2={x:xm-rx, y:ym-ry};
+
+        return {
+            d,a,h,xm,ym,
+            p1,p2
+        };
+    }
+
+    // Ray-based left-side picker:
+    // given ray P -> Q, pick intersection on LEFT of ray (cross > 0),
+    // otherwise pick the more "left" (larger cross).
+    function pickByRay(P, Q, X1, X2) {
+        function cross(P, Q, X) {
+            return (Q.x - P.x)*(X.y - P.y) - (Q.y - P.y)*(X.x - P.x);
+        }
+        const c1 = cross(P, Q, X1);
+        const c2 = cross(P, Q, X2);
+
+        if (c1 > 0 && c2 <= 0) return X1;
+        if (c2 > 0 && c1 <= 0) return X2;
+
+        return (c1 > c2) ? X1 : X2;
+    }
+
+    const canvas=document.getElementById('canvas');
+    const ctx=canvas.getContext('2d');
+    const axisJointEl=document.getElementById('axisJoint');
+    const showDebugEl=document.getElementById('showDebug');
+    const lenADEl=document.getElementById('lenAD');
+    const lenABEl=document.getElementById('lenAB');
+    const lenBCEl=document.getElementById('lenBC');
+    const lenCDEl=document.getElementById('lenCD');
+    const axisAngleEl=document.getElementById('axisAngle');
+    const angleLabelEl=document.getElementById('angleLabel');
+    const axisAngleBlock=document.getElementById('axisAngleBlock');
+    const axisPosBlock=document.getElementById('axisPosBlock');
+    const axisXEl=document.getElementById('axisX');
+    const axisYEl=document.getElementById('axisY');
+    const results=document.getElementById('results');
+
+    function updateUIBlocks(){
+        const j = axisJointEl.value;
+        if(j === 'A' || j === 'D'){
+            axisAngleBlock.style.display = '';
+            axisPosBlock.style.display = 'none';
+            angleLabelEl.textContent = (j === 'A') ? 'Angle at A (deg)' : 'Angle at D (deg)';
+        } else {
+            axisAngleBlock.style.display = 'none';
+            axisPosBlock.style.display = '';
+        }
+    }
+
+    function update(){
+        updateUIBlocks();
+
+        const AD=parseFloat(lenADEl.value);
+        const AB=parseFloat(lenABEl.value);
+        const BC=parseFloat(lenBCEl.value);
+        const CD=parseFloat(lenCDEl.value);
+        const axisJoint=axisJointEl.value;
+        const axisAngle=parseFloat(axisAngleEl.value);
+        const axisX=parseFloat(axisXEl.value);
+        const axisY=parseFloat(axisYEl.value);
+
+        if(!(AD>0 && AB>0 && BC>0 && CD>0)){
+            results.innerHTML='<h2>Results</h2><p>All lengths must be > 0.</p>';
+            clearCanvas();
+            return;
+        }
+
+        const A={x:0,y:0};
+        const D={x:AD,y:0};
+        let B=null, C=null;
+        let circleInfo=null;
+        let mathHtml='';
+
+        if(axisJoint === 'A'){
+            const th = toRad(axisAngle);
+            B = { x: A.x + AB*Math.cos(th),
+                y: A.y + AB*Math.sin(th) };
+
+            const I = circleIntersect(B,BC,D,CD);
+            if(!I){
+                clearCanvas();
+                results.innerHTML='<h2>Results</h2><p>No valid configuration for this angle at A.</p>';
+                return;
+            }
+            C = pickByRay(B, D, I.p1, I.p2);
+            circleInfo = { c1:{center:B,r:BC}, c2:{center:D,r:CD}, I };
+
+            mathHtml += `<div class="math-block"><h3>Axis at A (angle at A)</h3>
+              <div class="small">
+                <p>A and D are pinned on the ground. We set A = (0,0), D = (${AD.toFixed(3)}, 0).</p>
+                <p>We rotate AB of length ${AB.toFixed(3)} by the axis angle at A:</p>
+                <p>B = A + (AB·cosA, AB·sinA).</p>
+                <p>Then we find C as the intersection of circle(B, BC) and circle(D, CD), choosing the intersection on the left of the ray B→D.</p>
+              </div></div>`;
+        }
+        else if(axisJoint === 'D'){
+            const th = Math.PI - toRad(axisAngle);
+            C = { x: D.x + CD*Math.cos(th),
+                y: D.y + CD*Math.sin(th) };
+
+            const I = circleIntersect(A,AB,C,BC);
+            if(!I){
+                clearCanvas();
+                results.innerHTML='<h2>Results</h2><p>No valid configuration for this angle at D.</p>';
+                return;
+            }
+            B = pickByRay(A, D, I.p1, I.p2);
+            circleInfo = { c1:{center:A,r:AB}, c2:{center:C,r:BC}, I };
+
+            mathHtml += `<div class="math-block"><h3>Axis at D (angle at D)</h3>
+              <div class="small">
+                <p>A and D are pinned on the ground. We set A = (0,0), D = (${AD.toFixed(3)}, 0).</p>
+                <p>We rotate CD of length ${CD.toFixed(3)} so that the internal angle at D matches the axis angle.</p>
+                <p>C = D + (CD·cosθ, CD·sinθ) with θ chosen to place the linkage above ground.</p>
+                <p>Then we find B as the intersection of circle(A, AB) and circle(C, BC), selecting the intersection on the left of the ray A→D.</p>
+              </div></div>`;
+        }
+        else if(axisJoint === 'B'){
+            B = { x: axisX, y: axisY };
+
+            const I = circleIntersect(B,BC,D,CD);
+            if(!I){
+                clearCanvas();
+                results.innerHTML='<h2>Results</h2><p>Axis at B: no valid point C satisfying BC and CD from this B.</p>';
+                return;
+            }
+            C = pickByRay(B, D, I.p1, I.p2);
+            circleInfo = { c1:{center:B,r:BC}, c2:{center:D,r:CD}, I };
+
+            mathHtml += `<div class="math-block"><h3>Axis at B (B position fixed)</h3>
+              <div class="small">
+                <p>A and D are pinned on the ground: A = (0,0), D = (${AD.toFixed(3)}, 0).</p>
+                <p>The axis joint is B, and its physical position is given directly as:</p>
+                <p>B = (${axisX.toFixed(3)}, ${axisY.toFixed(3)}).</p>
+                <p>This gives the three points A, B, D, which define the triangle ABD.</p>
+                <p>We then find C as the intersection of circle(B, BC) and circle(D, CD), selecting the intersection on the left of the ray B→D to keep a consistent linkage branch.</p>
+              </div></div>`;
+        }
+        else if(axisJoint === 'C'){
+            C = { x: axisX, y: axisY };
+
+            const I = circleIntersect(A,AB,C,BC);
+            if(!I){
+                clearCanvas();
+                results.innerHTML='<h2>Results</h2><p>Axis at C: no valid point B satisfying AB and BC from this C.</p>';
+                return;
+            }
+            B = pickByRay(A, D, I.p1, I.p2);
+            circleInfo = { c1:{center:A,r:AB}, c2:{center:C,r:BC}, I };
+
+            mathHtml += `<div class="math-block"><h3>Axis at C (C position fixed)</h3>
+              <div class="small">
+                <p>A and D are pinned on the ground: A = (0,0), D = (${AD.toFixed(3)}, 0).</p>
+                <p>The axis joint is C, and its physical position is given directly as:</p>
+                <p>C = (${axisX.toFixed(3)}, ${axisY.toFixed(3)}).</p>
+                <p>This gives the three points A, C, D, which define the triangle ACD.</p>
+                <p>We then find B as the intersection of circle(A, AB) and circle(C, BC), selecting the intersection on the left of the ray A→D to keep a consistent linkage branch.</p>
+              </div></div>`;
+        }
+
+        // --- mechanical angles from resulting positions ---
+        const ABd=dist(A,B), BCd=dist(B,C), CDd=dist(C,D), ADd=dist(A,D);
+
+        const angleA_mech=angleAt(D,A,B);
+        const angleB_mech=angleAt(A,B,C);
+        const angleC_mech=angleAt(B,C,D);
+        const angleD_mech=angleAt(C,D,A);
+
+        let html='<h2>Joint Angles</h2>';
+        html += `<p>A = ${angleA_mech.toFixed(2)}°</p>`;
+        html += `<p>B = ${angleB_mech.toFixed(2)}°</p>`;
+        html += `<p>C = ${angleC_mech.toFixed(2)}°</p>`;
+        html += `<p>D = ${angleD_mech.toFixed(2)}°</p>`;
+        html += `<p>Measured lengths: AB = ${ABd.toFixed(3)}, BC = ${BCd.toFixed(3)}, CD = ${CDd.toFixed(3)}, AD = ${ADd.toFixed(3)}</p>`;
+
+        html += jointAngleMathHtml(A,B,C,D, angleA_mech,angleB_mech,angleC_mech,angleD_mech);
+        html += mathHtml;
+
+        results.innerHTML=html;
+
+        drawScene(A,B,C,D, angleA_mech,angleB_mech,angleC_mech,angleD_mech, circleInfo);
+    }
+
+    function jointAngleMathHtml(A,B,C,D,aA,aB,aC,aD){
+        const AB=dist(A,B), AD=dist(A,D), BD=dist(B,D);
+        const BC=dist(B,C), CD=dist(C,D);
+        const AC=dist(A,C);
+
+        return `<div class="math-block"><h3>Joint angle calculations (cosine rule)</h3>
+    <div class="small">
+      <p>Angle at A (between AD and AB), using △ABD:</p>
+      <p>|AB| = ${AB.toFixed(3)}, |AD| = ${AD.toFixed(3)}, |BD| = ${BD.toFixed(3)}</p>
+      <p>cos(∠A) = (AB² + AD² − BD²) / (2·AB·AD)</p>
+      <p>∠A = arccos(…) ≈ ${aA.toFixed(4)}°</p>
+
+      <p>Angle at B (between BA and BC), using △ABC:</p>
+      <p>|AB| = ${AB.toFixed(3)}, |BC| = ${BC.toFixed(3)}, |AC| = ${AC.toFixed(3)}</p>
+      <p>cos(∠B) = (AB² + BC² − AC²) / (2·AB·BC)</p>
+      <p>∠B = arccos(…) ≈ ${aB.toFixed(4)}°</p>
+
+      <p>Angle at C (between CB and CD), using △BCD:</p>
+      <p>|BC| = ${BC.toFixed(3)}, |CD| = ${CD.toFixed(3)}, |BD| = ${BD.toFixed(3)}</p>
+      <p>cos(∠C) = (BC² + CD² − BD²) / (2·BC·CD)</p>
+      <p>∠C = arccos(…) ≈ ${aC.toFixed(4)}°</p>
+
+      <p>Angle at D (between DC and DA), using △CDA:</p>
+      <p>|CD| = ${CD.toFixed(3)}, |AD| = ${AD.toFixed(3)}, |AC| = ${AC.toFixed(3)}</p>
+      <p>cos(∠D) = (CD² + AD² − AC²) / (2·CD·AD)</p>
+      <p>∠D = arccos(…) ≈ ${aD.toFixed(4)}°</p>
+    </div></div>`;
+    }
+
+    function clearCanvas(){
+        const w=canvas.clientWidth||600;
+        canvas.width=w;
+        canvas.height=w*0.5;
+        ctx.clearRect(0,0,canvas.width,canvas.height);
+    }
+
+    function drawGrid(ctx,minX,maxX,minY,maxY,TX,TY){
+        const major=1, minor=0.2;
+        ctx.lineWidth=1;
+        ctx.strokeStyle='rgba(255,255,255,0.05)';
+        for(let x=Math.ceil(minX/minor)*minor; x<=maxX; x+=minor){
+            ctx.beginPath(); ctx.moveTo(TX(x),TY(minY)); ctx.lineTo(TX(x),TY(maxY)); ctx.stroke();
+        }
+        for(let y=Math.ceil(minY/minor)*minor; y<=maxY; y+=minor){
+            ctx.beginPath(); ctx.moveTo(TX(minX),TY(y)); ctx.lineTo(TX(maxX),TY(y)); ctx.stroke();
+        }
+        ctx.lineWidth=1.5;
+        ctx.strokeStyle='rgba(255,255,255,0.12)';
+        for(let x=Math.ceil(minX/major)*major; x<=maxX; x+=major){
+            ctx.beginPath(); ctx.moveTo(TX(x),TY(minY)); ctx.lineTo(TX(x),TY(maxY)); ctx.stroke();
+        }
+        for(let y=Math.ceil(minY/major)*major; y<=maxY; y+=major){
+            ctx.beginPath(); ctx.moveTo(TX(minX),TY(y)); ctx.lineTo(TX(maxX),TY(y)); ctx.stroke();
+        }
+        if(minY<=0 && maxY>=0){
+            ctx.lineWidth=2;
+            ctx.strokeStyle='rgba(255,255,255,0.3)';
+            ctx.beginPath(); ctx.moveTo(TX(minX),TY(0)); ctx.lineTo(TX(maxX),TY(0)); ctx.stroke();
+        }
+    }
+
+    function drawScene(A,B,C,D,aA,aB,aC,aD,circleInfo){
+        const showDebug=showDebugEl.checked;
+
+        let pts=[A,B,C,D];
+        if(showDebug && circleInfo){
+            const {c1,c2}=circleInfo;
+            [c1,c2].forEach(c=>{
+                pts.push(
+                    {x:c.center.x+c.r, y:c.center.y},
+                    {x:c.center.x-c.r, y:c.center.y},
+                    {x:c.center.x, y:c.center.y+c.r},
+                    {x:c.center.x, y:c.center.y-c.r}
+                );
+            });
+        }
+
+        let minX=Math.min(...pts.map(p=>p.x));
+        let maxX=Math.max(...pts.map(p=>p.x));
+        let minY=Math.min(...pts.map(p=>p.y));
+        let maxY=Math.max(...pts.map(p=>p.y));
+        const pad=0.5;
+        minX-=pad; maxX+=pad;
+        minY=Math.min(minY,0)-pad; maxY+=pad;
+
+        const boxW=maxX-minX, boxH=maxY-minY;
+        const canvasW=canvas.clientWidth||600;
+        const scale=boxW>0?canvasW/boxW:1;
+        const canvasH=boxH*scale||200;
+        canvas.width=canvasW; canvas.height=canvasH;
+
+        function TX(x){ return (x-minX)*scale; }
+        function TY(y){ return canvasH-(y-minY)*scale; }
+
+        ctx.clearRect(0,0,canvasW,canvasH);
+
+        if(showDebug) drawGrid(ctx,minX,maxX,minY,maxY,TX,TY);
+
+        ctx.lineWidth=2;
+        ctx.strokeStyle='#555';
+        ctx.beginPath(); ctx.moveTo(TX(A.x),TY(A.y)); ctx.lineTo(TX(D.x),TY(D.y)); ctx.stroke();
+
+        ctx.lineWidth=3;
+        ctx.strokeStyle='#ddd';
+        ctx.beginPath();
+        ctx.moveTo(TX(A.x),TY(A.y));
+        ctx.lineTo(TX(B.x),TY(B.y));
+        ctx.lineTo(TX(C.x),TY(C.y));
+        ctx.lineTo(TX(D.x),TY(D.y));
+        ctx.stroke();
+
+        function dot(p,color){
+            ctx.fillStyle=color;
+            ctx.beginPath(); ctx.arc(TX(p.x),TY(p.y),6,0,Math.PI*2); ctx.fill();
+        }
+        dot(A,'#4aa3ff');
+        dot(B,'#ff5555');
+        dot(C,'#ffcc33');
+        dot(D,'#4aa3ff');
+
+        ctx.fillStyle='#fff';
+        ctx.font='13px Arial';
+        ctx.fillText('A ('+aA.toFixed(1)+'°)',TX(A.x)-35,TY(A.y)+20);
+        ctx.fillText('B ('+aB.toFixed(1)+'°)',TX(B.x)-25,TY(B.y)-10);
+        ctx.fillText('C ('+aC.toFixed(1)+'°)',TX(C.x)+10,TY(C.y)-10);
+        ctx.fillText('D ('+aD.toFixed(1)+'°)',TX(D.x)+10,TY(D.y)+20);
+
+        if(showDebug && circleInfo){
+            const {c1,c2,I}=circleInfo;
+            ctx.lineWidth=1.5;
+            ctx.strokeStyle='#0af';
+            ctx.beginPath();
+            ctx.arc(TX(c1.center.x),TY(c1.center.y),c1.r*scale,0,Math.PI*2);
+            ctx.stroke();
+
+            ctx.strokeStyle='#fa0';
+            ctx.beginPath();
+            ctx.arc(TX(c2.center.x),TY(c2.center.y),c2.r*scale,0,Math.PI*2);
+            ctx.stroke();
+
+            ctx.fillStyle='#f55';
+            ctx.beginPath(); ctx.arc(TX(I.p1.x),TY(I.p1.y),3,0,Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(TX(I.p2.x),TY(I.p2.y),3,0,Math.PI*2); ctx.fill();
+        }
+    }
+
+    [
+        axisJointEl, showDebugEl,
+        lenADEl, lenABEl, lenBCEl, lenCDEl,
+        axisAngleEl, axisXEl, axisYEl
+    ].forEach(el => el.addEventListener('input', update));
+
+    window.addEventListener('load', update);
+</script>
+</body>
+</html>
